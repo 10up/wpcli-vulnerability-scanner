@@ -1,0 +1,69 @@
+name: Functional Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - trunk
+
+jobs:
+  functional:
+    name: Functional - WP ${{ matrix.wp }} on PHP ${{ matrix.php }}
+    runs-on: ubuntu-20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4']
+        wp: ['latest']
+
+    services:
+       mysql:
+        image: mariadb:10.4
+        env:
+          MYSQL_DATABASE: wp_cli_test
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=10s --health-retries=10
+
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v3
+
+      - name: Set up PHP environment
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '${{ matrix.php }}'
+          extensions: gd, imagick, mysql, zip
+          coverage: none
+          tools: composer
+        env:
+          COMPOSER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Composer dependencies & cache dependencies
+        uses: "ramsey/composer-install@v2"
+        env:
+          COMPOSER_ROOT_VERSION: dev-${{ github.event.repository.default_branch }}
+        
+      - name: Configure DB environment
+        run: |
+          echo "MYSQL_HOST=127.0.0.1" >> $GITHUB_ENV
+          echo "MYSQL_TCP_PORT=${{ job.services.mysql.ports['3306'] }}" >> $GITHUB_ENV
+          echo "WP_CLI_TEST_DBROOTUSER=root" >> $GITHUB_ENV
+          echo "WP_CLI_TEST_DBROOTPASS=root" >> $GITHUB_ENV
+          echo "WP_CLI_TEST_DBNAME=wp_cli_test" >> $GITHUB_ENV
+          echo "WP_CLI_TEST_DBUSER=wp_cli_test" >> $GITHUB_ENV
+          echo "WP_CLI_TEST_DBPASS=password1" >> $GITHUB_ENV       
+          echo "WP_CLI_TEST_DBHOST=127.0.0.1:${{ job.services.mysql.ports['3306'] }}" >> $GITHUB_ENV
+
+      - name: Prepare test database
+        run: composer prepare-tests
+
+      - name: Check Behat environment
+        run: WP_CLI_TEST_DEBUG_BEHAT_ENV=1 composer behat
+
+      - name: Run Tests
+        env:
+          WP_VERSION: '${{ matrix.wp }}'
+        run: composer behat -- features/load-wp-cli.feature

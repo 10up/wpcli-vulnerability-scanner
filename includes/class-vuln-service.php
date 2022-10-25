@@ -1,0 +1,130 @@
+<?php
+/**
+ * Vuln_Service Class.
+ *
+ * @package WP-CLI Vulnerability Scanner
+ */
+
+if ( ! defined( 'WP_CLI' ) ) {
+	return;
+}
+
+/**
+ * Class for WP-CLI Vulnerability Scanner API Service.
+ */
+class Vuln_Service {
+
+	/**
+	 * Constructor
+	 *
+	 * @param array $assoc_args Array of command arguments.
+	 */
+	public function __construct( $assoc_args ) {
+		$this->assoc_args = $assoc_args;
+	}
+	/**
+	 * Helper function to check for a given property in an object
+	 *
+	 * @param string $field  Property name.
+	 * @param object $object Object having vulnerability details.
+	 * @return bool          Flag indicating the API
+	 */
+	protected function obj_has_non_empty_prop( $field, $object ) {
+		return isset( $object->{$field} ) && ! ( empty( $object->{$field} ) );
+	}
+
+	/**
+	 * Get singular and plural slugs for given string or array.
+	 *
+	 * @param string|array $singular_or_array If string, it's pluralized with an "s".
+	 *                                        If array, should be [ single, plural ].
+	 *
+	 * @return array
+	 */
+	protected function get_slugs( $singular_or_array ) {
+		if ( is_array( $singular_or_array ) ) {
+			$singular_type = $singular_or_array[0];
+			$plural_type   = $singular_or_array[1];
+		} else {
+			$singular_type = $singular_or_array;
+			$plural_type   = "{$singular_or_array}s";
+		}
+
+		return array( $singular_type, $plural_type );
+	}
+
+	/**
+	 * Parse list string into item array.
+	 *
+	 * @param string $list plugin or theme list.
+	 *
+	 * @return array
+	 */
+	protected function parse_list( $list ) {
+
+		$list    = explode( "\n", $list );
+		$newlist = array();
+
+		foreach ( $list as $line ) {
+			// Skip printed command.
+			if ( '$ ' === substr( $line, 0, 2 ) ) {
+				continue;
+			}
+			// Skip output header.
+			if ( 'name,version' === $line ) {
+				continue;
+			}
+			// Skip output footer.
+			if ( empty( $line ) ) {
+				break;
+			}
+
+			$newlist[] = array_combine(
+				array( 'name', 'version' ),
+				explode( ',', $line )
+			);
+
+		}
+
+		return $newlist;
+	}
+
+	/**
+	 * Get plugins/themes list to run test.
+	 *
+	 * @param string $type plugin or theme.
+	 * @return array array of test plugins or themes.
+	 */
+	protected function get_test_list( $type ) {
+		$list = array();
+
+		switch ( $type ) {
+			case 'plugin':
+				$list = array(
+					// fixed vulns.
+					array(
+						'name'    => 'relevant',
+						'version' => '1.0.2',
+					),
+					// array( 'name' => 'wordpress-seo',             'version' => '3.2.5' ),  // no vulns.
+					// array( 'name' => 'revslider',                 'version' => '1.0.0' ),  // fixed vulns.
+					// array( 'name' => 'fluid-respnsive-slideshow', 'version' => '2.2.6' ),  // ongoing vulns.
+				);
+				break;
+			case 'theme':
+				$list = array(
+					// fixed vulns.
+					array(
+						'name'    => 'digital-store',
+						'version' => '1.3',
+					),
+					// array( 'name' => 'twentyten',                 'version' => '1.0.0' ),  // no vulns.
+					// array( 'name' => 'twentyfifteen',             'version' => '1.0.0' ),  // fixed vulns.
+					// array( 'name' => 'epic',                      'version' => '1.0.0' ),  // ongoing vulns.
+				);
+				break;
+		}
+
+		return $list;
+	}
+}
