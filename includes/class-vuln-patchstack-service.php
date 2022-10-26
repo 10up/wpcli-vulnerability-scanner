@@ -1,0 +1,462 @@
+<?php
+/**
+ * Vuln_Patchstack_Service Class.
+ *
+ * @package WP-CLI Vulnerability Scanner
+ */
+
+if ( ! defined( 'WP_CLI' ) ) {
+	return;
+}
+
+// API URL constant defined so we can override it if needed.
+if ( ! defined( 'PATCHSTACK_API_URL' ) ) {
+	define( 'PATCHSTACK_API_URL', 'https://patchstack.com/database/api/v2/' );
+}
+
+/**
+ * Class for Patchstack API Service
+ */
+class Vuln_Patchstack_Service extends Vuln_Service {
+
+	/**
+	 * Patchstack API URL.
+	 *
+	 * @var string
+	 */
+	private $api_url = PATCHSTACK_API_URL;
+
+	/**
+	 * Worker for WordPress vulnerability checks.
+	 *
+	 * @return array
+	 */
+	public function check_wordpress() {
+		global $wp_version;
+		$slug = 'wordpress';
+
+		// Get data from API.
+		$endpoint = "product/$slug/$slug/$wp_version";
+		$response = $this->call( $endpoint );
+
+		$args = array(
+			'slug'    => $slug,
+			'version' => $wp_version,
+		);
+
+		// Prepare and return report data.
+		return $this->prepare_report_data( $response, $args );
+	}
+
+	/**
+	 * Worker for Plugin/Theme vulnerability checks.
+	 *
+	 * @param string       $slug    Installed plugin/theme slug.
+	 * @param string       $version Installed plugin/theme version.
+	 * @param string|array $type    The "thing" we're checking, "plugin" or "theme".
+	 *                              If string, it's pluralized with an "s".
+	 *                              If array, should be [ single, plural ].
+	 *
+	 * @return array Data array
+	 */
+	public function check_status( $slug, $version, $type ) {
+		list( $singular_type ) = $this->get_slugs( $type );
+		// Get data from API.
+		$endpoint = "product/$singular_type/$slug/$version";
+		$response = $this->call( $endpoint );
+
+		$args = array(
+			'slug'    => $slug,
+			'version' => $version,
+		);
+
+		// Prepare and return report data.
+		return $this->prepare_report_data( $response, $args );
+	}
+
+	/**
+	 * Worker, checks vulnerability in batch for themes/plugins.
+	 * If fail, It tun through checking the status of a each plugin/theme.
+	 *
+	 * @param string|array $type The "thing" we're checking.
+	 *                           If string, it's pluralized with an "s"
+	 *                           If array, should be [ single, plural ].
+	 *
+	 * @return array Statuses for all themes/plugins.
+	 */
+	public function check_thing( $type ) {
+		list( $singular_type ) = $this->get_slugs( $type );
+
+		$list = WP_CLI::launch_self(
+			$singular_type,
+			array( 'list' ),
+			array(
+				'format' => 'csv',
+				'fields' => 'name,version',
+			),
+			true,
+			true,
+		);
+
+		$list = $this->parse_list( $list );
+
+		// test list.
+		if ( isset( $this->assoc_args['test'] ) && $this->assoc_args['test'] ) {
+			$list = $this->get_test_list( $type );
+		}
+
+		$request_data = array();
+		foreach ( $list as $thing ) {
+			$request_data[] = array(
+				'name'    => $thing['name'],
+				'version' => isset( $thing['version'] ) ? $thing['version'] : '0',
+				'type'    => $singular_type,
+				'exists'  => false,
+			);
+		}
+
+		$result   = array();
+		$endpoint = 'batch';
+		// Batch API has limit of 50 items.
+		$request_data = array_chunk( $request_data, 50 );
+
+		$retry = false;
+		foreach ( $request_data as $data ) {
+			$response = $this->call( $endpoint, $data );
+			$report   = $this->prepare_batch_report_data( $response, $data );
+
+			if ( false === $report ) {
+				WP_CLI::debug( 'Unable to get vulnerabilities in batch.' );
+				$retry = true;
+				break;
+			}
+
+			if ( ! empty( $report ) ) {
+				$result = array_merge( $result, $report );
+			}
+		}
+
+		/*
+		 * Try getting vulnerabilities with separate request for each plugin/theme.
+		 *
+		 * Batch API can fail in 2 cases.
+		 * 	1. Some errors from Patchstack API.
+		 *  2. User has Free API key (Free API don't have supports batch operation).
+		 */
+		if ( $retry ) {
+			$result = array();
+			foreach ( $list as $thing ) {
+				$status = $this->check_status( $thing['name'], $thing['version'], $singular_type );
+				$result = array_merge( $result, $status );
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Prepare data for output.
+	 *
+	 * @param array|mixed|WP_Error $response API response object.
+	 * @param array                $args     Arguments related to current scan.
+	 */
+	private function prepare_report_data( $response, $args ) {
+		$slug         = $args['slug'];
+		$version      = $args['version'];
+		$is_wp        = false;
+		$display_slug = $slug;
+		if ( 'wordpress' === $slug ) {
+			$is_wp        = true;
+			$display_slug = "WordPress $version";
+		}
+
+		$code = wp_remote_retrieve_response_code( $response );
+		$body = wp_remote_retrieve_body( $response );
+
+		$report = array();
+
+		if ( 404 === $code ) {
+			$report[] = array(
+				'title' => "Error generating report for $display_slug",
+			);
+		} elseif ( 429 === $code ) {
+			$report[] = array(
+				'title' => 'ERROR_API_QUOTA_FULL: exceed daily rate limit hit.',
+			);
+		} else {
+
+			// Let's analyse the report!
+			$vulndb = json_decode( $body );
+
+			if ( ! isset( $vulndb->vulnerabilities ) ) {
+				$report[] = array(
+					'title' => "Error generating report for $display_slug",
+				);
+			} else {
+				$vulnerabilities = $vulndb->vulnerabilities;
+
+				if ( is_array( $vulnerabilities ) && ! empty( $vulnerabilities ) ) {
+					$report = $this->format_vulnerability_data( $vulnerabilities, $version );
+				}
+
+				$total = count( $report );
+				if ( $total <= 0 ) {
+					$report[] = array(
+						'title' => 'No vulnerabilities reported for this version of ' . ( $is_wp ? 'WordPress' : $slug ),
+					);
+				}
+			}
+		}
+
+		$table_format = false;
+		if ( ! isset( $this->assoc_args['format'] ) || 'table' === $this->assoc_args['format'] ) {
+			$table_format = true;
+		}
+
+		$data      = array();
+		$last_item = '';
+		foreach ( $report as $index => $stat ) {
+
+			$stat = wp_parse_args(
+				$stat,
+				array(
+					'id'          => '',
+					'action'      => '',
+					'fix'         => 'n/a',
+					'affected_in' => 'n/a',
+				)
+			);
+
+			if ( $is_wp ) {
+				$name = ( $table_format && 0 !== $index ? '' : 'WordPress' );
+			} else {
+				$name = ( $table_format && $slug === $last_item ? '' : $slug );
+			}
+
+			if ( $table_format ) {
+				switch ( $stat['action'] ) {
+					case 'update':
+						$name = \WP_CLI::colorize( "%r$name%n" );
+						break;
+					case 'watch':
+						$name = \WP_CLI::colorize( "%y$name%n" );
+						break;
+					default:
+						break;
+				}
+			}
+
+			// These keys must match the column headings in the formatter (extras ok).
+			$data[] = array(
+				'name'              => $name,
+				'slug'              => $slug,
+				'installed version' => $version,
+				'id'                => $stat['id'],
+				'status'            => $stat['title'],
+				'fix'               => $stat['fix'],
+				'introduced in'     => $stat['affected_in'],
+				'action'            => $stat['action'],
+			);
+
+			$last_item = $slug;
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Prepare data for output.
+	 *
+	 * @param array|mixed|WP_Error $response API response object.
+	 * @param array                $data     vulnerability request data.
+	 */
+	private function prepare_batch_report_data( $response, $data ) {
+		$code = wp_remote_retrieve_response_code( $response );
+		$body = wp_remote_retrieve_body( $response );
+
+		if ( 200 !== $code ) {
+			return false;
+		}
+
+		$result          = array();
+		$plugin_versions = array();
+		foreach ( $data as $thing ) {
+			$plugin_versions[ $thing['name'] ] = $thing['version'];
+		}
+
+		// Let's analyse the report!
+		$vulndb = json_decode( $body );
+
+		if ( ! isset( $vulndb->vulnerabilities ) ) {
+			return false;
+		} else {
+			$vuln_data = (array) $vulndb->vulnerabilities;
+
+			if ( is_array( $vuln_data ) && ! empty( $vuln_data ) ) {
+				foreach ( $vuln_data as $slug => $vulnerabilities ) {
+					$report  = array();
+					$version = ! empty( $plugin_versions[ $slug ] ) ? $plugin_versions[ $slug ] : '0';
+
+					if ( ! empty( $vulnerabilities ) ) {
+						$formatted_data = $this->format_vulnerability_data( $vulnerabilities, $version );
+						if ( ! empty( $formatted_data ) ) {
+							$report = array_merge( $report, $formatted_data );
+						} else {
+							$report[] = array(
+								'title' => 'No vulnerabilities reported for this version of ' . $slug,
+							);
+						}
+					} else {
+						$report[] = array(
+							'title' => 'No vulnerabilities reported for this version of ' . $slug,
+						);
+					}
+
+					$table_format = false;
+					if ( ! isset( $this->assoc_args['format'] ) || 'table' === $this->assoc_args['format'] ) {
+						$table_format = true;
+					}
+
+					$data      = array();
+					$last_item = '';
+					foreach ( $report as $index => $stat ) {
+
+						$stat = wp_parse_args(
+							$stat,
+							array(
+								'id'          => '',
+								'action'      => '',
+								'fix'         => 'n/a',
+								'affected_in' => 'n/a',
+							)
+						);
+
+						$name = ( $table_format && $slug === $last_item ? '' : $slug );
+
+						if ( $table_format ) {
+							switch ( $stat['action'] ) {
+								case 'update':
+									$name = \WP_CLI::colorize( "%r$name%n" );
+									break;
+								case 'watch':
+									$name = \WP_CLI::colorize( "%y$name%n" );
+									break;
+								default:
+									break;
+							}
+						}
+
+						// These keys must match the column headings in the formatter (extras ok).
+						$data[] = array(
+							'name'              => $name,
+							'slug'              => $slug,
+							'installed version' => $version,
+							'id'                => $stat['id'],
+							'status'            => $stat['title'],
+							'fix'               => $stat['fix'],
+							'introduced in'     => $stat['affected_in'],
+							'action'            => $stat['action'],
+						);
+
+						$last_item = $slug;
+					}
+					$result = array_merge( $result, $data );
+				}
+			} else {
+				return false;
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Format Vulnerability data.
+	 *
+	 * @param array  $vulnerabilities Array of Vulnerability.
+	 * @param string $version         plugin or theme version.
+	 * @return array Formatted array of Vulnerability.
+	 */
+	private function format_vulnerability_data( $vulnerabilities, $version ) {
+		$report = array();
+
+		foreach ( $vulnerabilities as $vuln ) {
+			// API has records for affected_in ?
+			$affected_in = $this->obj_has_non_empty_prop( 'affected_in', $vuln );
+			// Check for fix version.
+			$fixed_since = $this->obj_has_non_empty_prop( 'fixed_in', $vuln );
+
+			// vulnerability that hasn't been fixed :(.
+			if ( ! $fixed_since ) {
+
+				$report[] = array(
+					'id'          => $vuln->id,
+					'title'       => $vuln->title,
+					'fix'         => 'Not fixed',
+					'affected_in' => $affected_in ? $vuln->affected_in : 'n/a',
+					'action'      => 'watch',
+				);
+
+				// Vuln version, fix available.
+			} elseif ( version_compare( $version, $vuln->fixed_in, '<' ) ) {
+
+				$report[] = array(
+					'id'          => $vuln->id,
+					'title'       => $vuln->title,
+					'fix'         => " Fixed in {$vuln->fixed_in}",
+					'affected_in' => $affected_in ? $vuln->affected_in : 'n/a',
+					'action'      => 'update',
+				);
+			}
+		}
+
+		return $report;
+	}
+
+	/**
+	 * Call the Patchstack API.
+	 *
+	 * @param string $endpoint The endpoint.
+	 * @param array  $data     Request data (optional).
+	 *
+	 * @return array|mixed|WP_Error
+	 */
+	protected function call( $endpoint, $data = array() ) {
+
+		if ( ! defined( 'VULN_API_TOKEN' ) ) {
+			WP_CLI::error( 'VULN_API_TOKEN is not set.' );
+			die();
+		}
+
+		$url = $this->api_url . $endpoint;
+
+		$key = 'vuln_check-' . md5( $url );
+
+		$args = array(
+			'headers' => array(
+				'PSKey' => VULN_API_TOKEN,
+			),
+			'method'  => 'GET',
+		);
+		if ( ! empty( $data ) ) {
+			$request_data   = wp_json_encode( $data );
+			$args['method'] = 'POST';
+			$args['body']   = $request_data;
+
+			// Set content type.
+			$args['headers']['Content-Type'] = 'application/json';
+
+			$key = 'vuln_check-' . md5( $url . $request_data );
+		}
+
+		$response = get_transient( $key );
+		if ( ! $response ) {
+			$response = wp_remote_request( $url, $args );
+			set_transient( $key, $response, HOUR_IN_SECONDS );
+		} else {
+			WP_CLI::debug( "Use response cache for $url" );
+		}
+
+		return $response;
+	}
+}

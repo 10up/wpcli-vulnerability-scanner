@@ -1,0 +1,431 @@
+<?php
+/**
+ * Vuln_WPScan_Service Class.
+ *
+ * @package WP-CLI Vulnerability Scanner
+ */
+
+if ( ! defined( 'WP_CLI' ) ) {
+	return;
+}
+
+// API URL constant defined so we can override it if needed.
+if ( ! defined( 'VULN_API_URL' ) ) {
+	define( 'VULN_API_URL', 'https://wpscan.com/api/v3/' );
+}
+
+/**
+ * Class for WPScan API Service
+ */
+class Vuln_WPScan_Service extends Vuln_Service {
+
+	/**
+	 * WPScan API URL.
+	 *
+	 * @var string
+	 */
+	private $api_url = VULN_API_URL;
+
+	/**
+	 * Worker for WordPress vulnerability checks.
+	 *
+	 * @return array
+	 */
+	public function check_wordpress() {
+		$singular_type = 'wordpress';
+		$plural_type   = 'wordpresses';
+
+		global $wp_version;
+		$version  = str_replace( '.', '', $wp_version );
+		$endpoint = $plural_type . '/' . $version;
+
+		$response = $this->call( $endpoint );
+
+		$code = wp_remote_retrieve_response_code( $response );
+		$body = wp_remote_retrieve_body( $response );
+
+		$table_format = false;
+		if ( ! isset( $this->assoc_args['format'] ) || 'table' === $this->assoc_args['format'] ) {
+			$table_format = true;
+		}
+
+		$report = array();
+
+		if ( 404 === $code ) {
+			$report[] = array(
+				'title' => "Error generating report for WordPress $wp_version",
+			);
+		} elseif ( 429 === $code ) {
+			$report[] = array(
+				'title' => 'ERROR_API_QUOTA_FULL: exceed daily rate limit hit.',
+			);
+		} else {
+
+			// Let's analyse the report!
+			$vulndb = json_decode( $body );
+
+			if ( ! isset( $vulndb->$wp_version ) || isset( $vulndb->error ) ) {
+				if ( isset( $vulndb->error ) ) {
+					$report[] = array(
+						'title' => $vulndb->error,
+					);
+				} else {
+					$report[] = array(
+						'title' => "NVF Error generating report for WordPress $wp_version",
+					);
+				}
+			} else {
+
+				$vulnerabilities = $vulndb->$wp_version->vulnerabilities;
+
+				if ( is_array( $vulnerabilities ) ) {
+					foreach ( $vulnerabilities as $k => $vuln ) {
+
+						// API has records for when was introduced ?
+						$reported_since = $this->obj_has_non_empty_prop( 'introduced_in', $vuln );
+						// Check for fix version.
+						$fixed_since = $this->obj_has_non_empty_prop( 'fixed_in', $vuln );
+
+						// vulnerability that hasn't been fixed :(.
+						if ( ! $fixed_since ) {
+
+							$report[] = array(
+								'id'            => $vuln->id,
+								'title'         => $vuln->title,
+								'fix'           => 'Not fixed',
+								'introduced_in' => $reported_since ? $vuln->introduced_in : 'n/a',
+								'action'        => 'watch',
+							);
+
+							// vuln version, fix available.
+						} elseif (
+							// If no records for when it was introduced, compare fixed version against current .
+							(
+								! $reported_since
+								&& version_compare( $version, $vuln->fixed_in, '<' )
+							)
+							||
+							(
+								// If have records for when it was introduced.
+								$reported_since
+								// Check if using version with introduced vulnerablity.
+								&& version_compare( $version, $vuln->introduced_in, '>=' )
+								// Check if using version with vulnerablity fixed.
+								&& version_compare( $version, $vuln->fixed_in, '<' )
+							)
+						) {
+
+							$report[] = array(
+								'id'            => $vuln->id,
+								'title'         => $vuln->title,
+								'fix'           => " Fixed in {$vuln->fixed_in}",
+								'introduced_in' => $reported_since ? $vuln->introduced_in : 'n/a',
+								'action'        => 'update',
+							);
+
+							// if installed plugin version is greater than a fixed version,
+							// unset that vuln entry, we don't need it.
+						} else {
+
+							// This leaves us with an array of relevant vulns
+							// not currently used :/.
+							unset( $vulnerabilities[ $k ] );
+						}
+					}
+				}
+
+				$total = count( $report );
+				if ( $total <= 0 ) {
+					$report[] = array(
+						'title' => 'No vulnerabilities reported for this version of WordPress',
+					);
+				}
+			}
+		}
+
+		$data = array();
+
+		foreach ( $report as $index => $stat ) {
+
+			$stat = wp_parse_args(
+				$stat,
+				array(
+					'id'            => '',
+					'action'        => '',
+					'fix'           => 'n/a',
+					'introduced_in' => 'n/a',
+				)
+			);
+
+			$name = ( $table_format && 0 !== $index ? '' : 'WordPress' );
+
+			if ( $table_format ) {
+				switch ( $stat['action'] ) {
+					case 'update':
+						$name = \WP_CLI::colorize( "%r$name%n" );
+						break;
+					case 'watch':
+						$name = \WP_CLI::colorize( "%y$name%n" );
+						break;
+					default:
+						break;
+				}
+			}
+
+			// these keys must match the column headings in the formatter (extras ok).
+			$data[] = array(
+				'name'              => $name,
+				'slug'              => 'wordpress',
+				'installed version' => $wp_version,
+				'id'                => $stat['id'],
+				'status'            => $stat['title'],
+				'fix'               => $stat['fix'],
+				'introduced in'     => $stat['introduced_in'],
+				'action'            => $stat['action'],
+			);
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Check wpscan.com for reports
+	 * Total how many are relevant
+	 *
+	 * @param string       $slug    Installed plugin/theme slug.
+	 * @param string       $version Installed plugin/theme version.
+	 * @param string|array $type    The "thing" we're checking, "plugin" or "theme".
+	 *                              If string, it's pluralized with an "s".
+	 *                              If array, should be [ single, plural ].
+	 *
+	 * @return array Data array
+	 */
+	public function check_status( $slug, $version, $type ) {
+		list( $singular_type, $plural_type ) = $this->get_slugs( $type );
+
+		$endpoint = $plural_type . '/' . $slug;
+		$response = $this->call( $endpoint );
+
+		$code = wp_remote_retrieve_response_code( $response );
+		$body = wp_remote_retrieve_body( $response );
+
+		$table_format = false;
+		if ( ! isset( $this->assoc_args['format'] ) || 'table' === $this->assoc_args['format'] ) {
+			$table_format = true;
+		}
+
+		$report = array();
+
+		if ( 404 === $code ) {
+			$report[] = array(
+				'title' => "Error generating report for $slug",
+			);
+		} elseif ( 429 === $code ) {
+			$report[] = array(
+				'title' => 'ERROR_API_QUOTA_FULL: exceed daily rate limit hit.',
+			);
+		} else {
+
+			// let's analyse the report!
+			$vulndb = json_decode( $body );
+
+			if ( isset( $vulndb->error ) ) {
+				$report[] = array(
+					'title' => "Error generating report for $slug",
+				);
+			}
+
+			$vulnerabilities = array();
+
+			if ( isset( $vulndb->$slug ) && isset( $vulndb->$slug->vulnerabilities ) ) {
+				$vulnerabilities = $vulndb->$slug->vulnerabilities;
+			}
+
+			if ( is_array( $vulnerabilities ) && ! empty( $vulnerabilities ) ) {
+				foreach ( $vulnerabilities as $k => $vuln ) {
+					// API has records for when was introduced ?
+					$reported_since = $this->obj_has_non_empty_prop( 'introduced_in', $vuln );
+					// Check for fix version.
+					$fixed_since = $this->obj_has_non_empty_prop( 'fixed_in', $vuln );
+
+					// vulnerability that hasn't been fixed :(.
+					if ( ! $fixed_since ) {
+
+						$report[] = array(
+							'id'            => $vuln->id,
+							'title'         => $vuln->title,
+							'fix'           => 'Not fixed',
+							'introduced_in' => $reported_since ? $vuln->introduced_in : 'n/a',
+							'action'        => 'watch',
+						);
+
+						// vuln version, fix available.
+					} elseif (
+						// If no records for when it was introduced, compare fixed version against current .
+						(
+							! $reported_since
+							&& version_compare( $version, $vuln->fixed_in, '<' )
+						)
+						||
+						(
+							// If have records for when it was introduced.
+							$reported_since
+							// Check if using version with introduced vulnerablity.
+							&& version_compare( $version, $vuln->introduced_in, '>=' )
+							// Check if using version with vulnerablity fixed.
+							&& version_compare( $version, $vuln->fixed_in, '<' )
+						)
+					) {
+
+						$report[] = array(
+							'id'            => $vuln->id,
+							'title'         => $vuln->title,
+							'fix'           => "Fixed in {$vuln->fixed_in}",
+							'introduced_in' => $reported_since ? $vuln->introduced_in : 'n/a',
+							'action'        => 'update',
+						);
+
+						// if installed plugin version is greater than a fixed version,
+						// unset that vuln entry, we don't need it.
+					} else {
+
+						// This leaves us with an array of relevant vulns
+						// not currently used :/.
+						unset( $vulnerabilities[ $k ] );
+					}
+				}
+			}
+
+			$total = count( $report );
+			if ( $total <= 0 ) {
+				$report[] = array(
+					'title' => "No vulnerabilities reported for this version of $slug",
+				);
+			}
+		}
+
+		$data = array();
+
+		$last_item = '';
+		foreach ( $report as $stat ) {
+
+			$stat = wp_parse_args(
+				$stat,
+				array(
+					'id'            => '',
+					'action'        => '',
+					'fix'           => 'n/a',
+					'introduced_in' => 'n/a',
+				)
+			);
+			$name = ( $table_format && $slug === $last_item ? '' : $slug );
+
+			if ( $table_format ) {
+				switch ( $stat['action'] ) {
+					case 'update':
+						$name = WP_CLI::colorize( "%r$name%n" );
+						break;
+					case 'watch':
+						$name = WP_CLI::colorize( "%y$name%n" );
+						break;
+					default:
+						break;
+				}
+			}
+
+			// these keys must match the column headings in the formatter (extras ok).
+			$data[]    = array(
+				'name'              => $name,
+				'slug'              => $slug,
+				'installed version' => $version,
+				'id'                => $stat['id'],
+				'status'            => $stat['title'],
+				'fix'               => $stat['fix'],
+				'introduced in'     => $stat['introduced_in'],
+				'action'            => $stat['action'],
+			);
+			$last_item = $slug;
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Worker. Run through checking the status of a plugin/theme
+	 *
+	 * @param string|array $type The "thing" we're checking.
+	 *                           If string, it's pluralized with an "s"
+	 *                           If array, should be [ single, plural ].
+	 *
+	 * @return array Statuses for all themes
+	 */
+	public function check_thing( $type ) {
+		list( $singular_type ) = $this->get_slugs( $type );
+
+		$list = WP_CLI::launch_self(
+			$singular_type,
+			array( 'list' ),
+			array(
+				'format' => 'csv',
+				'fields' => 'name,version',
+			),
+			true,
+			true,
+		);
+
+		$list = $this->parse_list( $list );
+
+		// test list.
+		if ( isset( $this->assoc_args['test'] ) && $this->assoc_args['test'] ) {
+			$list = $this->get_test_list( $type );
+		}
+
+		$data = array();
+
+		foreach ( $list as $thing ) {
+
+			$status = $this->check_status( $thing['name'], $thing['version'], $singular_type );
+
+			$data = array_merge( $data, $status );
+
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Call the VulnDB API.
+	 *
+	 * @param string $endpoint The endpoint.
+	 *
+	 * @return array|mixed|WP_Error
+	 */
+	protected function call( $endpoint ) {
+
+		if ( ! defined( 'VULN_API_TOKEN' ) ) {
+			WP_CLI::error( 'VULN_API_TOKEN is not set.' );
+			die();
+		}
+
+		$url = $this->api_url . $endpoint;
+
+		$key = 'vuln_check-' . md5( $url );
+
+		$args = array(
+			'headers' => array(
+				'Authorization' => 'Token token=' . VULN_API_TOKEN,
+			),
+			'method'  => 'GET',
+		);
+
+		$response = get_transient( $key );
+		if ( ! $response ) {
+			$response = wp_remote_request( $url, $args );
+			set_transient( $key, $response, HOUR_IN_SECONDS );
+		} else {
+			WP_CLI::debug( "Use response cache for $url" );
+		}
+
+		return $response;
+	}
+}
