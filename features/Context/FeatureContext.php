@@ -198,6 +198,12 @@ class FeatureContext implements SnippetAcceptingContext {
 	 * Get the environment variables required for launched `wp` processes
 	 */
 	private static function get_process_env_variables() {
+		static $env = null;
+
+		if ( null !== $env ) {
+			return $env;
+		}
+
 		// Ensure we're using the expected `wp` binary.
 		$bin_path = self::get_bin_path();
 		wp_cli_behat_env_debug( "WP-CLI binary path: {$bin_path}" );
@@ -333,30 +339,15 @@ class FeatureContext implements SnippetAcceptingContext {
 		}
 
 		$result = Process::create( 'wp cli info', null, self::get_process_env_variables() )->run_check();
-		echo PHP_EOL;
-		echo $result->stdout;
-		echo PHP_EOL;
-
-		if ( getenv( 'WP_CLI_TEST_DEBUG_BEHAT_ENV' ) ) {
-			exit;
-		}
+		echo "{$result->stdout}\n";
 
 		self::cache_wp_files();
 
 		$result = Process::create( Utils\esc_cmd( 'wp core version --debug --path=%s', self::$cache_dir ), null, self::get_process_env_variables() )->run_check();
+		echo "[Debug messages]\n";
+		echo "{$result->stderr}\n";
 
-		$ci     = getenv( 'CI' );
-		$travis = getenv( 'TRAVIS' );
-		if ( $travis || $ci ) {
-			$travis && print( "travis_fold:start:wp_cli_debug\n" );
-			echo "[Debug messages]\n";
-			echo $result->stderr;
-			$travis && print( "travis_fold:end:wp_cli_debug\n" );
-		}
-
-		echo PHP_EOL;
-		echo 'WordPress ' . $result->stdout;
-		echo PHP_EOL;
+		echo "WordPress {$result->stdout}\n";
 
 		// Remove install cache if any (not setting the static var).
 		$wp_version        = getenv( 'WP_VERSION' );
@@ -364,6 +355,10 @@ class FeatureContext implements SnippetAcceptingContext {
 		$install_cache_dir = sys_get_temp_dir() . '/wp-cli-test-core-install-cache' . $wp_version_suffix;
 		if ( file_exists( $install_cache_dir ) ) {
 			self::remove_dir( $install_cache_dir );
+		}
+
+		if ( getenv( 'WP_CLI_TEST_DEBUG_BEHAT_ENV' ) ) {
+			exit;
 		}
 	}
 
