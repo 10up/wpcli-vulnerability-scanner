@@ -37,13 +37,13 @@ class Parser implements \IteratorAggregate, PositionAware
     /** @var ItemDecoder */
     private $jsonDecoder;
 
-    /** @var string */
+    /** @var string|null */
     private $matchedJsonPointer;
 
     /** @var array */
     private $paths;
 
-    /** @var array */
+    /** @var array|null */
     private $currentPath;
 
     /** @var array */
@@ -247,7 +247,7 @@ class Parser implements \IteratorAggregate, PositionAware
         }
 
         if ($token === null) {
-            $this->error('Cannot iterate empty JSON', $token);
+            $this->error('Cannot iterate empty JSON', '');
         }
 
         if ($currentLevel > -1 && ! $subtreeEnded) {
@@ -321,6 +321,9 @@ class Parser implements \IteratorAggregate, PositionAware
         return array_values($this->jsonPointers);
     }
 
+    /**
+     * @throws JsonMachineException
+     */
     public function getCurrentJsonPointer(): string
     {
         if ($this->currentPath === null) {
@@ -330,6 +333,9 @@ class Parser implements \IteratorAggregate, PositionAware
         return self::pathToJsonPointer($this->currentPath);
     }
 
+    /**
+     * @throws JsonMachineException
+     */
     public function getMatchedJsonPointer(): string
     {
         if ($this->matchedJsonPointer === null) {
@@ -346,7 +352,7 @@ class Parser implements \IteratorAggregate, PositionAware
      */
     private function error($msg, $token, $exception = SyntaxErrorException::class)
     {
-        throw new $exception($msg." '".$token."'", $this->tokens->getPosition());
+        throw new $exception($msg." '".$token."'", $this->tokens instanceof PositionAware ? $this->tokens->getPosition() : 0);
     }
 
     /**
