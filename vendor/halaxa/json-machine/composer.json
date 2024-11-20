@@ -1,0 +1,50 @@
+{
+    "name": "halaxa/json-machine",
+    "description": "Efficient, easy-to-use and fast JSON pull parser",
+    "license": "Apache-2.0",
+    "authors": [
+        {
+            "name": "Filip Halaxa",
+            "email": "filip@halaxa.cz"
+        }
+    ],
+    "scripts": {
+        "tests": "build/composer-update.sh && vendor/bin/phpunit",
+        "tests-coverage": "build/composer-update.sh && XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-clover clover.xml",
+        "cs-check": "build/composer-update.sh && vendor/bin/php-cs-fixer fix --dry-run --verbose --allow-risky=yes",
+        "cs-fix": "build/composer-update.sh && vendor/bin/php-cs-fixer fix --verbose --allow-risky=yes",
+        "phpstan": "build/composer-update.sh && vendor/bin/phpstan analyse",
+        "performance-tests": "php -d xdebug.mode=off -d opcache.enable_cli=1 -d opcache.jit_buffer_size=100M test/performance/testPerformance.php"
+    },
+    "config": {
+        "lock": false,
+        "sort-packages": true
+    },
+    "require": {
+        "php": "7.0 - 8.3"
+    },
+    "require-dev": {
+        "ext-json": "*",
+        "friendsofphp/php-cs-fixer": "^3.0",
+        "phpstan/phpstan": "^1.10",
+        "phpunit/phpunit": "^8.0"
+    },
+    "suggest": {
+        "ext-json": "To run JSON Machine out of the box without custom decoders.",
+        "guzzlehttp/guzzle": "To run example with GuzzleHttp"
+    },
+    "autoload": {
+        "psr-4": {"JsonMachine\\": "src/"},
+        "exclude-from-classmap": ["src/autoloader.php"]
+    },
+    "autoload-dev": {
+        "psr-4": {"JsonMachineTest\\": "test/JsonMachineTest"}
+    },
+    "funding": [
+        {
+            "type": "other",
+            "url": "https://ko-fi.com/G2G57KTE4"
+        }
+    ]
+
+}
